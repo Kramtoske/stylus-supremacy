@@ -268,7 +268,7 @@ function format(content, options = {}) {
 				} else {
 					// Put the line-consecutive comment(s) on the top of the inner node
 					const belowNode = inputNode.nodes[index + 1]
-					if (sortedNonCommentNodes.includes(belowNode)) {
+					if (_.includes(sortedNonCommentNodes, belowNode)) {
 						if (belowNode.commentsOnTop === undefined) {
 							belowNode.commentsOnTop = []
 						}
@@ -339,16 +339,20 @@ function format(content, options = {}) {
 			}
 
 		} else if (inputNode instanceof Stylus.nodes.Property) {
+			if (insideExpression === false) {
+				outputBuffer.append(indent)
+			}
+
 			// Insert the property name
 			const propertyName = travelThroughSegments(inputNode, indentLevel).join('')
-			outputBuffer.append(indent + propertyName)
+			outputBuffer.append(propertyName)
 
 			// Insert the property value(s)
 			if (inputNode.expr instanceof Stylus.nodes.Expression) {
 				// Extract the last portion of comments
 				// For example,
 				// margin: 8px 0; /* right-comment */
-				const commentsOnTheRight = _.chain(inputNode.expr.nodes).clone().reverse().takeWhile(node => node instanceof Stylus.nodes.Comment).reverse().value()
+				const commentsOnTheRight = _.takeRightWhile(inputNode.expr.nodes, node => node instanceof Stylus.nodes.Comment)
 				const nodesExcludingCommentsOnTheRight = inputNode.expr.nodes.slice(0, inputNode.expr.nodes.length - commentsOnTheRight.length)
 
 				let propertyValues = nodesExcludingCommentsOnTheRight.map(node => travel(inputNode, node, indentLevel, true))
@@ -360,12 +364,16 @@ function format(content, options = {}) {
 				if (options.reduceMarginAndPaddingValues && (propertyName === 'margin' || propertyName === 'padding') && nodesExcludingCommentsOnTheRight.some(node => node instanceof Stylus.nodes.Comment) === false) {
 					if (propertyValues.length > 1 && propertyValues.every(text => text === propertyValues[0])) {
 						propertyValues = [propertyValues[0]]
+
 					} else if (propertyValues.length >= 3 && propertyValues[0] === propertyValues[2] && (propertyValues[1] === propertyValues[3] || propertyValues[3] === undefined)) {
 						propertyValues = [propertyValues[0], propertyValues[1]]
+
 					} else if (propertyValues.length === 4 && propertyValues[0] !== propertyValues[2] && propertyValues[1] === propertyValues[3]) {
 						propertyValues = [propertyValues[0], propertyValues[1], propertyValues[2]]
 					}
-				} else if (propertyName === 'border' || propertyName === 'outline') {
+				}
+
+				if (propertyName === 'border' || propertyName === 'outline') {
 					if (options.alwaysUseNoneOverZero && propertyValues.length === 1 && /^0(\.0*)?(\w+|\%)?/.test(propertyValues[0])) {
 						propertyValues = ['none']
 					}
@@ -382,14 +390,14 @@ function format(content, options = {}) {
 						outputBuffer.append(':' + options.newLineChar)
 						const innerIndent = indent + options.tabStopChar
 						outputBuffer.append(innerIndent)
-						outputBuffer.append(propertyValues.join(',' + options.newLineChar + innerIndent))
+						outputBuffer.append(propertyValues.join((inputNode.expr.isList ? ',' : '') + options.newLineChar + innerIndent))
 
 					} else {
 						if (options.insertColons) {
 							outputBuffer.append(':')
 						}
 						outputBuffer.append(' ')
-						outputBuffer.append(propertyValues.join(comma))
+						outputBuffer.append(propertyValues.join(inputNode.expr.isList ? comma : ' '))
 					}
 
 				} else {
@@ -414,13 +422,15 @@ function format(content, options = {}) {
 				throw error
 			}
 
-			if (options.insertSemicolons) {
-				outputBuffer.append(';')
+			if (insideExpression === false) {
+				if (options.insertSemicolons) {
+					outputBuffer.append(';')
+				}
+				outputBuffer.append(options.newLineChar)
 			}
-			outputBuffer.append(options.newLineChar)
 
 		} else if (inputNode instanceof Stylus.nodes.Literal) {
-			if (inputNode.parent instanceof Stylus.nodes.Property && inputNode.parent.expr.nodes.length === 1) { // In case of @css property
+			if (inputNode.parent instanceof Stylus.nodes.Property && inputNode.parent.expr.nodes.length === 1 && inputNode.parent.expr.nodes[0] === inputNode) { // In case of @css property
 				// Note that it must be wrapped inside a pair of braces
 				outputBuffer.append('@css {')
 				if (inputNode.val.trim().length > 0) {
@@ -475,7 +485,7 @@ function format(content, options = {}) {
 			}
 
 		} else if (inputNode instanceof Stylus.nodes.String) {
-			if (inputNode.val.includes(options.quoteChar)) {
+			if (_.includes(inputNode.val, options.quoteChar)) {
 				if (inputNode.val.startsWith('data:image/svg+xml;utf8,')) { // In case of SVG data-URL
 					const counterQuoteChar = schema.quoteChar.enum.find(item => item !== options.quoteChar)
 
@@ -633,89 +643,97 @@ function format(content, options = {}) {
 				outputBuffer.append(indent)
 			}
 
-			const parentIsArithmeticOperator =
-				inputNode.parent instanceof Stylus.nodes.UnaryOp ||
-				(
+			(function () {
+				// Handle the special case for a unit suffix
+				if (
+					inputNode.nodes.length === 2 &&
+					inputNode.nodes[0] instanceof Stylus.nodes.BinOp &&
+					inputNode.nodes[1] instanceof Stylus.nodes.Ident
+				) {
+					outputBuffer.append(openParen)
+					outputBuffer.append(travel(inputNode, inputNode.nodes[0], indentLevel, true))
+					outputBuffer.append(closeParen)
+					outputBuffer.append(travel(inputNode, inputNode.nodes[1], indentLevel, true))
+					return
+				}
+
+				const parentIsArithmeticOperator =
+					inputNode.parent instanceof Stylus.nodes.UnaryOp ||
+					(
+						inputNode.nodes.length === 1 &&
+						inputNode.nodes[0] instanceof Stylus.nodes.BinOp &&
+						inputNode.parent instanceof Stylus.nodes.BinOp &&
+						inputNode.parent.op !== '[]' &&
+						inputNode.parent.op !== '[]='
+					)
+				const parentIsStringInterpolation =
+					inputNode.parent instanceof Stylus.nodes.BinOp &&
+					inputNode.parent.op === '%' &&
+					inputNode.parent.right === inputNode &&
+					inputNode.nodes.length > 1
+				const parentIsNestedExpression =
+					inputNode.nodes.length === 1 &&
+					inputNode.parent instanceof Stylus.nodes.Expression &&
+					!(inputNode.parent instanceof Stylus.nodes.Arguments) && // Note that `Arguments` type inherits `Expression` type
+					inputNode.parent.parent &&
+					(
+						inputNode.parent.parent instanceof Stylus.nodes.Expression &&
+						!(inputNode.parent.parent instanceof Stylus.nodes.Arguments) &&
+						inputNode.parent.parent.nodes.indexOf(inputNode.parent) >= 1 || // Note that this is a bug from Stylus compiler where it adds extra Expression node
+						inputNode.parent.parent instanceof Stylus.nodes.Feature ||
+						inputNode.parent.parent instanceof Stylus.nodes.Ident ||
+						inputNode.parent.parent instanceof Stylus.nodes.If ||
+						inputNode.parent.parent instanceof Stylus.nodes.Each ||
+						inputNode.parent.parent instanceof Stylus.nodes.Selector ||
+						inputNode.parent.parent instanceof Stylus.nodes.Return ||
+						inputNode.parent.parent instanceof Stylus.nodes.Arguments ||
+						inputNode.parent.parent instanceof Stylus.nodes.Object ||
+						inputNode.parent.parent instanceof Stylus.nodes.BinOp && inputNode.parent.parent.op === '[]'
+					) === false
+				const currentIsEmpty =
+					inputNode.nodes.length === 0 &&
+					inputNode.parent instanceof Stylus.nodes.Expression &&
+					!(inputNode.parent instanceof Stylus.nodes.Arguments) && // Note that `Arguments` type inherits `Expression` type
+					inputNode.parent.nodes.length === 1
+				const currentIsDivision =
 					inputNode.nodes.length === 1 &&
 					inputNode.nodes[0] instanceof Stylus.nodes.BinOp &&
-					inputNode.parent instanceof Stylus.nodes.BinOp &&
-					inputNode.parent.op !== '[]' &&
-					inputNode.parent.op !== '[]='
-				)
-			const parentIsStringInterpolation =
-				inputNode.parent instanceof Stylus.nodes.BinOp &&
-				inputNode.parent.op === '%' &&
-				inputNode.parent.right === inputNode &&
-				inputNode.nodes.length > 1
-			const parentIsNestedExpression =
-				inputNode.nodes.length === 1 &&
-				inputNode.parent instanceof Stylus.nodes.Expression &&
-				!(inputNode.parent instanceof Stylus.nodes.Arguments) && // Note that `Arguments` type inherits `Expression` type
-				inputNode.parent.parent &&
-				(
-					inputNode.parent.parent instanceof Stylus.nodes.Expression &&
-					!(inputNode.parent.parent instanceof Stylus.nodes.Arguments) &&
-					inputNode.parent.parent.nodes.indexOf(inputNode.parent) >= 1 || // Note that this is a bug from Stylus compiler where it adds extra Expression node
-					inputNode.parent.parent instanceof Stylus.nodes.Feature ||
-					inputNode.parent.parent instanceof Stylus.nodes.Ident ||
-					inputNode.parent.parent instanceof Stylus.nodes.If ||
-					inputNode.parent.parent instanceof Stylus.nodes.Selector ||
-					inputNode.parent.parent instanceof Stylus.nodes.Return ||
-					inputNode.parent.parent instanceof Stylus.nodes.Arguments ||
-					inputNode.parent.parent instanceof Stylus.nodes.Object ||
-					inputNode.parent.parent instanceof Stylus.nodes.BinOp && inputNode.parent.parent.op === '[]'
-				) === false
-			const currentIsEmpty =
-				inputNode.nodes.length === 0 &&
-				inputNode.parent instanceof Stylus.nodes.Expression &&
-				!(inputNode.parent instanceof Stylus.nodes.Arguments) && // Note that `Arguments` type inherits `Expression` type
-				inputNode.parent.nodes.length === 1
-			const currentIsDivision =
-				inputNode.nodes.length === 1 &&
-				inputNode.nodes[0] instanceof Stylus.nodes.BinOp &&
-				inputNode.nodes[0].op === '/'
-			const currentIsNegation =
-				inputNode.nodes.length === 1 &&
-				inputNode.nodes[0] instanceof Stylus.nodes.UnaryOp &&
-				inputNode.nodes[0].op === '-'
-			const currentHasUnitSuffix =
-				inputNode.nodes.length === 2 &&
-				inputNode.nodes[0] instanceof Stylus.nodes.BinOp &&
-				inputNode.nodes[1] instanceof Stylus.nodes.Ident
-			const currentHasParenthesis =
-				parentIsArithmeticOperator ||
-				parentIsStringInterpolation ||
-				parentIsNestedExpression ||
-				currentIsEmpty ||
-				currentIsDivision ||
-				currentIsNegation
-			if (currentHasParenthesis || currentHasUnitSuffix) {
-				outputBuffer.append(openParen)
-			}
-
-			outputBuffer.append(inputNode.nodes.map((node, rank, list) => {
-				// Use either a white-space or a comma as a separator
-				let separator = ' '
-				if (rank === 0) {
-					separator = ''
-				} else if (inputNode.isList) {
-					separator = comma
+					inputNode.nodes[0].op === '/'
+				const currentIsNegation =
+					inputNode.nodes.length === 1 &&
+					inputNode.nodes[0] instanceof Stylus.nodes.UnaryOp &&
+					inputNode.nodes[0].op === '-'
+				const currentHasParenthesis =
+					parentIsArithmeticOperator ||
+					parentIsStringInterpolation ||
+					parentIsNestedExpression ||
+					currentIsEmpty ||
+					currentIsDivision ||
+					currentIsNegation
+				if (currentHasParenthesis) {
+					outputBuffer.append(openParen)
 				}
 
-				if (currentHasUnitSuffix && node === _.last(list)) {
-					return closeParen + travel(inputNode, node, indentLevel, true)
+				outputBuffer.append(inputNode.nodes.map((node, rank, list) => {
+					// Use either a white-space or a comma as a separator
+					let separator = ' '
+					if (rank === 0) {
+						separator = ''
+					} else if (inputNode.isList) {
+						separator = comma
+					}
 
-				} else if (node instanceof Stylus.nodes.Ident && insideExpression === false) {
-					return separator + '{' + travel(inputNode, node, indentLevel, true) + '}'
+					if (node instanceof Stylus.nodes.Ident && insideExpression === false) {
+						return separator + '{' + travel(inputNode, node, indentLevel, true) + '}'
+					}
 
-				} else {
 					return separator + travel(inputNode, node, indentLevel, true)
-				}
-			}).join(''))
+				}).join(''))
 
-			if (currentHasParenthesis) {
-				outputBuffer.append(closeParen)
-			}
+				if (currentHasParenthesis) {
+					outputBuffer.append(closeParen)
+				}
+			})()
 
 			if (insideExpression === false) {
 				if (options.insertSemicolons) {
@@ -734,7 +752,11 @@ function format(content, options = {}) {
 				outputBuffer.append(inputNode.val)
 			}
 
-			if (!options.alwaysUseZeroWithoutUnit || inputNode.val !== 0 || inputNode.type === 's' || inputNode.type === 'ms') {
+			if (checkIfFlexBasis(inputNode) && inputNode.val === 0) {
+				// See https://github.com/philipwalton/flexbugs#flexbug-4
+				outputBuffer.append('%')
+
+			} else if (!options.alwaysUseZeroWithoutUnit || inputNode.val !== 0 || inputNode.type === 's' || inputNode.type === 'ms') {
 				outputBuffer.append(inputNode.type)
 			}
 
@@ -976,7 +998,7 @@ function format(content, options = {}) {
 
 		} else if (inputNode instanceof Stylus.nodes.Keyframes) {
 			outputBuffer.append(indent + '@keyframes ')
-			outputBuffer.append(travelThroughSegments(inputNode, indentLevel).filter(text => text.trim().length > 0).join(comma))
+			outputBuffer.append(travelThroughSegments(inputNode, indentLevel).filter(text => text.trim().length > 0).join(''))
 			outputBuffer.append(travel(inputNode, inputNode.block, indentLevel))
 
 		} else if (inputNode instanceof Stylus.nodes.QueryList) {
@@ -1000,7 +1022,10 @@ function format(content, options = {}) {
 			if (inputNode.expr) {
 				outputBuffer.append(openParen)
 				outputBuffer.append(travelThroughSegments(inputNode, indentLevel).join(''))
-				outputBuffer.append(': ')
+				if (options.insertColons) {
+					outputBuffer.append(':')
+				}
+				outputBuffer.append(' ')
 				outputBuffer.append(travel(inputNode, inputNode.expr, indentLevel, true))
 				outputBuffer.append(closeParen)
 
@@ -1029,7 +1054,7 @@ function format(content, options = {}) {
 
 		} else if (inputNode instanceof Stylus.nodes.Atrule) {
 			outputBuffer.append(indent + '@' + inputNode.type)
-			if (_.some(inputNode.segments)) {
+			if (inputNode.segments.length > 0) {
 				outputBuffer.append(' ')
 				outputBuffer.append(travelThroughSegments(inputNode, indentLevel).join(''))
 				outputBuffer.remove(' ')
@@ -1038,6 +1063,7 @@ function format(content, options = {}) {
 				outputBuffer.append(travel(inputNode, inputNode.block, indentLevel))
 			} else if (options.insertSemicolons) {
 				outputBuffer.append(';')
+				outputBuffer.append(options.newLineChar)
 			}
 
 		} else if (inputNode instanceof Stylus.nodes.Atblock) {
@@ -1338,13 +1364,19 @@ function format(content, options = {}) {
 	}
 
 	function getType(inputNode) {
-		if (inputNode instanceof Stylus.nodes.Property) {
+		if (
+			inputNode instanceof Stylus.nodes.Property ||
+			inputNode instanceof Stylus.nodes.If && inputNode.postfix && inputNode.block instanceof Stylus.nodes.Property
+		) {
 			return 'Property'
 
 		} else if (inputNode instanceof Stylus.nodes.Import) {
 			return 'Import'
 
-		} else if (inputNode.block !== undefined || (inputNode instanceof Stylus.nodes.Ident && inputNode.val.block !== undefined)) {
+		} else if (
+			inputNode.block !== undefined ||
+			(inputNode instanceof Stylus.nodes.Ident && inputNode.val.block !== undefined)
+		) {
 			return 'Block'
 
 		} else {
@@ -1424,6 +1456,25 @@ function checkIfTernary(node) {
 		node.cond.op === 'is defined' &&
 		node.cond.left instanceof Stylus.nodes.Ident &&
 		node.cond.left.val instanceof Stylus.nodes.Expression
+	)
+}
+
+function checkIfFlexBasis(node) {
+	return (
+		node instanceof Stylus.nodes.Unit &&
+		node.parent instanceof Stylus.nodes.Property &&
+		node.parent.segments.length === 1 &&
+		node.parent.segments[0] instanceof Stylus.nodes.Ident &&
+		(
+			(
+				node.parent.segments[0].name === 'flex' &&
+				node.parent.expr.nodes[2] === node
+			) ||
+			(
+				node.parent.segments[0].name === 'flex-basis' &&
+				node.parent.expr.nodes[0] === node
+			)
+		)
 	)
 }
 

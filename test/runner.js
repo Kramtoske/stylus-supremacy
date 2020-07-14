@@ -20,9 +20,16 @@ const Stylus = require('stylus')
 const format = require('../edge/format')
 const compareContent = require('../edge/compareContent')
 
-const filesAndDirectories = _.chain(ps.argv.length > 2 ? ps.argv.slice(2) : ['*']).map(para => glob.sync('spec/' + para)).flatten().value()
+const filesAndDirectories = _.chain(ps.argv.slice(2))
+	.reject(para => para.startsWith('-'))
+	.thru(list => list.length > 0 ? list : ['*'])
+	.flatMap(para => glob.sync('spec/' + para))
+	.filter(directory => fs.lstatSync(directory).isDirectory() && fs.readdirSync(directory).length > 0)
+	.value()
 const filesOnly = path => pt.extname(path) === '.js'
 const directoriesOnly = path => pt.extname(path) === ''
+
+const outputOverwritten = ps.argv.includes('-u')
 
 filesAndDirectories.filter(directoriesOnly).forEach(directory => {
 	const optionFilePath = pt.join(directory, 'formattingOptions.json')
@@ -34,17 +41,25 @@ filesAndDirectories.filter(directoriesOnly).forEach(directory => {
 	const outputDebuggingFilePath = pt.join(directory, 'output-debugging.json')
 
 	const inputContent = fs.readFileSync(inputFilePath, 'utf8')
-	const outputContent = fs.readFileSync(outputFilePath, 'utf8')
 
 	let formattingOptions = undefined
 	if (fs.existsSync(optionFilePath)) {
 		formattingOptions = require('../' + optionFilePath)
 	}
 
+	if (fs.existsSync(outputFilePath) === false || outputOverwritten) {
+		const actualContent = format(inputContent, formattingOptions)
+		fs.writeFileSync(outputFilePath, actualContent)
+	}
+
+	const outputContent = fs.readFileSync(outputFilePath, 'utf8')
+
 	const testSpecName = pt.basename(directory)
 	describe(testSpecName, () => {
 		it('can be formatted', () => {
-			if (fs.existsSync(inputFormattedFilePath)) fs.unlinkSync(inputFormattedFilePath)
+			if (fs.existsSync(inputFormattedFilePath)) {
+				fs.unlinkSync(inputFormattedFilePath)
+			}
 
 			try {
 				const tree = new Stylus.Parser(inputContent).parse()
