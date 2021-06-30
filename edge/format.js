@@ -379,6 +379,9 @@ function format(content, options = {}) {
 					}
 				}
 
+				// See https://github.com/ThisIsManta/stylus-supremacy/issues/79
+				const preserveColons = nodesExcludingCommentsOnTheRight.length === 1 && nodesExcludingCommentsOnTheRight[0] instanceof Stylus.nodes.Expression
+
 				// Insert the property value(s) without the last portion of comments
 				if (nodesExcludingCommentsOnTheRight.every(node => node instanceof Stylus.nodes.Expression)) {
 					const numberOfLineTaken = _.chain(nodesExcludingCommentsOnTheRight)
@@ -393,7 +396,7 @@ function format(content, options = {}) {
 						outputBuffer.append(propertyValues.join((inputNode.expr.isList ? ',' : '') + options.newLineChar + innerIndent))
 
 					} else {
-						if (options.insertColons) {
+						if (options.insertColons || preserveColons) {
 							outputBuffer.append(':')
 						}
 						outputBuffer.append(' ')
@@ -401,7 +404,7 @@ function format(content, options = {}) {
 					}
 
 				} else {
-					if (options.insertColons) {
+					if (options.insertColons || preserveColons) {
 						outputBuffer.append(':')
 					}
 					outputBuffer.append(' ')
@@ -1385,9 +1388,8 @@ function format(content, options = {}) {
 	}
 
 	function getProperVariableName(name) {
-		if (/^\d/.test(name) || /\s/.test(name)) {
+		if (/^-/.test(name) || /^\d/.test(name) || /\s/.test(name)) {
 			return options.quoteChar + name + options.quoteChar
-
 		} else {
 			return name
 		}
